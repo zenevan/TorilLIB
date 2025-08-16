@@ -1,18 +1,14 @@
 --[[
 ==================================================================
-PowerDBManager.lua Script v2.0
-- Builds a database of character powers, including custom cooldowns.
-- Automatically fetches power details from the MUD.
-- Creates a dynamic UI in GUI.Box2 with clickable, square buttons
-  that disable during their specific cooldown period.
+PowerDBManager Script v2.1 (Simplified & More Reliable)
 ==================================================================
 --]]
 
--- Initialize our Character Database. This will hold all power info.
+-- Initialize our Character Database
 if not chDB then
   chDB = {
-    powers = {}, -- Stores data for each power, indexed by alias (e.g., chDB.powers.cc)
-    ui = {}      -- Stores the UI elements (buttons)
+    powers = {},
+    ui = {}
   }
 end
 
@@ -20,150 +16,168 @@ end
 -- SECTION 1: DATA CAPTURE & PARSING
 ------------------------------------------------------------------
 
--- This function is called by a trigger when it captures a power's help file.
--- It parses the text and saves the data to our database.
 function parsePowerHelp(text)
-  -- Capture the name, alias, and recharge time from the text block
-  local name = text:match("Name%s+:%s+(.-)%s+%[")
   local alias = text:match("Name%s+:%s+.-%s+%[(%w+)%]")
   local rechargeLine = text:match("Recharge%s+:%s+(.+)")
 
-  if not (name and alias and rechargeLine) then
-    cecho("<red>Error parsing power help file.\n")
+  if not alias then
+    cecho("<red>DB PARSE ERROR: Could not find alias in help text.\n")
     return
   end
 
-  local rechargeSeconds = 10 -- Default cooldown if we can't parse it
-  local num, unit = rechargeLine:match("(%d+)%s+(%w+)")
-  num = tonumber(num)
-
-  if num and unit then
-    if unit:match("minute") then
-      rechargeSeconds = num * 60
-    elseif unit:match("second") then
-      rechargeSeconds = num
+  local rechargeSeconds = 10 -- Default cooldown
+  if rechargeLine then
+    local num, unit = rechargeLine:match("(%d+)%s+(%w+)")
+    if num and unit then
+      num = tonumber(num)
+      if unit:match("minute") then
+        rechargeSeconds = num * 60
+      elseif unit:match("second") then
+        rechargeSeconds = num
+      end
     end
   end
 
-  -- Save the extracted data into our database
   chDB.powers[alias] = {
-    name = name,
+    name = text:match("Name%s+:%s+(.-)%s+%["),
     recharge = rechargeSeconds,
     isReady = true
   }
-  cecho(string.format("<gold>DB: Saved '%s' (%s) with a %d sec cooldown.\n", name, alias, rechargeSeconds))
+  cecho(string.format("<gold>DB: Saved '%s' with a %d sec cooldown.\n", alias, rechargeSeconds))
 end
 
--- This function takes the raw text from the 'powers all' command,
--- extracts all the aliases, and then automatically sends the help
--- command for each one to build our database.
 function fetchAllPowerDetails(powerListText)
+  -- Clear old data to start fresh
+  chDB.powers = {}
+
   local aliasesToFetch = {}
-  -- Use gmatch to find every alias in the text
   for alias in powerListText:gmatch("%[%s*(%w+)%s*%]") do
     table.insert(aliasesToFetch, alias)
   end
 
+  if #aliasesToFetch == 0 then
+    cecho("<red>ERROR: No power aliases found in the list. The gmatch loop failed.\n")
+    return
+  end
+
   cecho("<green>Found " .. #aliasesToFetch .. " powers. Fetching details...\n")
 
-  -- Use a temporary timer to send commands one by one,
-  -- preventing spam and giving the MUD time to respond.
-  local i = 1
-  tempTimer(0.5, function()
-    if i <= #aliasesToFetch then
-      send("powers help " .. aliasesToFetch[i])
-      i = i + 1
-      return true -- Continue the timer
-    else
-      -- We've fetched all details. Now, build the UI.
-      cecho("<green>All power details fetched. Building UI...\n")
+  -- This new function will create a reliable chain of commands
+  local function fetchNext(currentIndex)
+    -- This is our stop condition. If we're past the end of the list, we're done.
+    if currentIndex > #aliasesToFetch then
+      cecho("<green>All power details fetched. Building UI!\n")
       setupPowerButtons()
-      return false -- Stop the timer
+      return -- This ends the chain
     end
-  end)
+
+    -- Get the current alias and send the command
+    local alias = aliasesToFetch[currentIndex]
+    send("powers help " .. alias)
+
+    -- Create a NEW, single-shot timer that will call this function
+    -- again for the NEXT item in the list after a short delay.
+    -- This is more reliable than a single repeating timer.
+    tempTimer(1.1, function()
+      fetchNext(currentIndex + 1)
+    end)
+  end
+
+  -- Start the chain reaction by fetching the very first item (index 1)
+  fetchNext(1)
 end
 
 ------------------------------------------------------------------
 -- SECTION 2: UI CREATION
 ------------------------------------------------------------------
+-- This table will hold our UI container
+if not ui then ui = {} end
 
--- This function builds the button UI inside GUI.Box2
-function setupPowerButtons()
-  -- First, clear any old buttons
-  for _, button in pairs(chDB.ui) do
-    button:delete()
+function setupPowerButtons(powerListText)
+  -- <<< CHANGE 1: The cleanup is now much simpler.
+  -- If our button container already exists from a previous run, delete it and all its contents.
+  if ui.powersContainer then
+    ui.powersContainer:delete()
   end
-  chDB.ui = {}
 
-  -- Create a container that will arrange our buttons in a grid
-  local grid = Geyser.Grid:new({
-    name = "powersGrid",
-    parent = GUI.Box2, -- Place this inside your existing GUI.Box2
-    gridWidth = 4, -- How many buttons per row (change as you like)
-    itemWidth = 50, -- Width of each button
-    itemHeight = 50 -- Height of each button (making them square)
-  })
+  -- <<< CHANGE 2: Create a new VBox to automatically stack our buttons.
+  -- This VBox is placed inside your GUI.Box2.
+  ui.powersContainer = Geyser.VBox:new({
+    name = "powersContainer", -- Give it a name for the cleanup code above
+  }, GUI.Box2)
 
-  -- Loop through all the powers we have in our database
-  for alias, data in pairs(chDB.powers) do
-    -- Create the button
-    local button = Geyser.Button:new({
-      name = "btn_" .. alias,
-      message = alias:upper() -- Show the alias on the button
-    }, grid) -- Add the button to our grid container
+  -- Trim the incoming text block
+  local plist = string.trim(powerListText)
 
-    chDB.ui[alias] = button -- Save a reference to the button
+  -- Loop through each line of the captured text
+  for line in string.gmatch(plist, "[^\r\n]+") do
+    -- Use a pattern to capture the Power Name and its Alias
+    local powerName, alias = line:match([[^\s*([A-Za-z\s]+?)\s+\[\s*(\w+)\s*\]])
 
-    -- Style for when the button is ready
-    local readyStyle = [[
-      background-color: rgb(30, 80, 30);
-      color: white;
-      border: 2px outset beige;
-      border-radius: 5px;
-      font-size: 14px;
-      font-weight: bold;
-    ]]
+    if powerName and alias then
+      powers[powerName] = {
+        alias = alias,
+        isReady = true
+      }
 
-    -- Style for when the button is on cooldown
-    local cooldownStyle = [[
-      background-color: rgb(100, 20, 20);
-      color: grey;
-      border: 2px inset black;
-      border-radius: 5px;
-      font-size: 14px;
-      font-weight: bold;
-    ]]
+      -- <<< CHANGE 3: Add the button to our new VBox, not directly to GUI.Box2.
+      local button = Geyser.Label:new({
+        name = "btn_" .. alias,
+        message = powerName
+      }, ui.powersContainer) -- The VBox is now the parent
 
-    button:setStyleSheet(readyStyle)
+      -- The rest of your code for styling and cooldowns is perfect and needs no changes.
+      button:setStyleSheet([[
+        background-color: rgb(30, 80, 30);
+        color: white;
+        border-style: outset;
+        border-width: 2px;
+        border-radius: 5px;
+        border-color: beige;
+        padding: 5px;
+        margin-bottom: 2px;
+      ]])
 
-    -- This function runs when you click the button
-    button:setOnRelease(function()
-      if chDB.powers[alias].isReady then
-        -- 1. Send the command
-        send(alias)
+      button:setOnRelease(function()
+        if powers[powerName].isReady then
+          send(powers[powerName].alias)
+          powers[powerName].isReady = false
+          local countdown = 10
 
-        -- 2. Start the cooldown
-        chDB.powers[alias].isReady = false
-        local countdown = chDB.powers[alias].recharge
-        button:disable() -- Make the button unclickable
-        button:setStyleSheet(cooldownStyle)
+          button:setStyleSheet([[
+            background-color: rgb(100, 20, 20);
+            color: grey;
+            border-style: inset;
+            border-width: 2px;
+            border-radius: 5px;
+            border-color: black;
+            padding: 5px;
+            margin-bottom: 2px;
+          ]])
 
-        -- 3. Create a timer to manage the countdown
-        tempTimer(0, function()
-          if countdown > 0 then
-            button:setText(countdown .. "s")
-            countdown = countdown - 1
-            return true -- Continue timer
-          else
-            -- Cooldown finished! Reset the button
-            chDB.powers[alias].isReady = true
-            button:setText(alias:upper())
-            button:setStyleSheet(readyStyle)
-            button:enable() -- Make it clickable again
-            return false -- Stop timer
-          end
-        end)
-      end
-    end)
+          tempTimer(0, function()
+            if countdown > 0 then
+              button:setText(powerName .. " (" .. countdown .. "s)")
+              countdown = countdown - 1
+              return true
+            else
+              powers[powerName].isReady = true
+              button:setText(powerName)
+              button:setStyleSheet([[
+                background-color: rgb(30, 80, 30);
+                color: white;
+                border-style: outset;
+                border-width: 2px;
+                border-radius: 5px;
+                border-color: beige;
+                padding: 5px;
+                margin-bottom: 2px;
+              ]])
+              return false
+            end
+          end)
+        end
+      end)
+    end
   end
 end
