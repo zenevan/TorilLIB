@@ -16,6 +16,11 @@
 -- Uses table.save / table.load for persistence (no SQLite)
 -- ============================================================
 
+-- ============================================================
+-- ShopLib.lua  —  Shop data store for TorilMUD
+-- Uses table.save / table.load for persistence (no SQLite)
+-- ============================================================
+
 ShopLib              = ShopLib  or {}
 shopdata             = shopdata  or {}
 ShopLib.currentVnum  = nil
@@ -487,6 +492,8 @@ function ShopLib.help()
 <cyan>#shop stat <term,term,-term>         <white>raw item search no stats
 <cyan>#shop buy <words>                    <white>quick price and location lookup
 <cyan>#shop find <words>                   <white>find item with full stats across all shops
+<cyan>#shop catalog                        <white>all items for sale in current area
+<cyan>#shop catalog <area>                 <white>all items for sale in specified area
 <cyan>#shop export                         <white>export all shops to text file
 <cyan>#shop import                         <white>import shops from text file
 <white>────────────────────────────────────────────────────────────────────
@@ -619,6 +626,9 @@ function ShopLib.cmd(argstring)
     elseif cmd == "import" then
         ShopLib.import(rest ~= "" and rest or nil)
 
+    elseif cmd == "catalog" then
+        ShopLib.catalog(rest ~= "" and rest or nil)
+    
     elseif cmd == "help" then
         ShopLib.help()
 
@@ -630,5 +640,40 @@ end
 -- ══════════════════════════════════════════════════════════════
 -- AUTO-LOAD
 -- ══════════════════════════════════════════════════════════════
+
+function ShopLib.catalog(areaname)
+    local larea = (areaname or map:getCurrentZone() or ""):lower()
+    if larea == "" then
+        cecho("<yellow>[ShopLib] No area specified and no current zone found.\n"); return
+    end
+    local found = {}
+    for _, shop in pairs(shopdata) do
+        if shop.area:lower():find(larea, 1, true) then
+            found[#found + 1] = shop
+        end
+    end
+    table.sort(found, function(a, b) return a.vnum < b.vnum end)
+    if #found == 0 then
+        cecho(string.format("<yellow>No shops found in area matching '%s'.\n", larea)); return
+    end
+    cecho(string.format(
+        "<white>══ Catalog for '<cyan>%s<white>' ══════════════════════════════════════\n", larea))
+    for _, shop in ipairs(found) do
+        cecho(string.format(
+            "<white>── <cyan>%s <grey>(%s) <white>vnum:<yellow>%d ──\n",
+            shop.keeper, shop.zone, shop.vnum))
+        if #shop.items == 0 then
+            cecho("<grey>  No items recorded.\n")
+        else
+            for _, item in ipairs(shop.items) do
+                cecho(string.format(
+                    "<green>  %2d) <white>%-42s <yellow>%s\n",
+                    item.listnum, item.name, item.price))
+            end
+        end
+        cecho("\n")
+    end
+    cecho(string.format("<grey>%d shop(s) in %s\n", #found, larea))
+end
 
 ShopLib.load()
