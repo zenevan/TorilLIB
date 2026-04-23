@@ -1,0 +1,440 @@
+-- =============================================================================
+-- SCRIPT: fwalk
+-- All #fwalk logic lives here. Alias is one line: fwalk_run(matches[2], matches[3], matches[4])
+-- ALIAS REGEX: ^#fwalk( [0-9A-Za-z]+)?( [A-Za-z0-9]+)?( [0-9A-Za-z]+)?
+-- =============================================================================
+
+-- persistent step state across calls
+fwalk_stepstate = fwalk_stepstate or { name="", path={}, dirs={}, pos=0 }
+
+-- =============================================================================
+-- INTERNAL: chunk long path string for display
+-- =============================================================================
+local function tt(s)
+  local t = {}
+  for p in s:gmatch("..?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?.?") do
+    t[#t+1] = p
+  end
+  for i, v in ipairs(t) do
+    print("." .. v)
+  end
+  echo("\n")
+end
+
+-- =============================================================================
+-- INTERNAL: fastwalk to a room id
+-- =============================================================================
+function fwalk_fastwalk(xroomid)
+  fwalkQue = false
+
+  if map:getRoom() == nil then
+    cecho("<red>[Error: source room id is nil]\n")
+    return
+  end
+
+  -- unhide destination if it got locked out
+  if roomExists(xroomid) and getRoomArea(xroomid) == -1 then
+    unhideRoom(xroomid)
+    cecho("<yellow>[Unhiding room " .. xroomid .. " before pathing]\n")
+  end
+
+  if getPath(map:getRoom(), xroomid) then
+    doSpeedWalk()
+  else
+    cecho("<red>[Unable to find path to room#" .. xroomid .. "]\n")
+  end
+end
+-- =============================================================================
+-- INTERNAL: show full path info for a room id (no movement)
+-- =============================================================================
+local function showfastwalk(xroomid)
+  if roomLocked(xroomid) then
+    cecho("<red>[Error: Destination room is locked]\n")
+    return
+  end
+
+  if map:getRoom() == nil then
+    cecho("<red>[Error: source room id is nil]\n")
+    return
+  end
+
+  if getPath(map:getRoom(), xroomid) then
+    local path = compressSpeedwalk()
+
+    if #speedWalkPath > 100 then
+      cecho("<red>Path length: <green>" .. #speedWalkPath .. " <red>rooms  100th room <green>" .. speedWalkPath[100] .. "\n\n")
+    else
+      cecho("<red>Path length: <green>" .. #speedWalkPath .. " <red>rooms\n\n")
+    end
+
+    cecho("<red>Path from current room (" .. map:getRoom() .. ") to " .. xroomid .. " (" .. getRoomName(xroomid) .. ")\n")
+    cecho("<green>Speedwalk: ." .. path .. "\n\n")
+
+    if string.len(path) > 100 then
+      tt(path)
+    end
+
+    cecho("<red>Reverse path from " .. xroomid .. " (" .. getRoomName(xroomid) .. ") to current room: " .. map:getRoom() .. " (" .. getRoomName(map:getRoom()) .. ")\n")
+    getPath(xroomid, map:getRoom())
+    cecho("<green>Speedwalk: ." .. compressSpeedwalk() .. "\n\n")
+  else
+    cecho("<red>[Unable to find path to room vnum " .. xroomid .. "]\n")
+  end
+end
+
+-- =============================================================================
+-- HELP
+-- =============================================================================
+function fwalk_help()
+  cecho("<red>Usage:\n")
+  cecho("<red>  #fwalk roomnumber       - fastwalk to specified room number\n")
+  cecho("<red>  #fwalk name             - fastwalk to room indicated by fwalk name\n")
+  cecho("<red>  #fwalk add name         - add fwalk to current room using 'name'\n")
+  cecho("<red>  #fwalk add name vnum    - add fwalk to vnum using 'name'\n")
+  cecho("<red>  #fwalk del name         - delete fwalk 'name'\n")
+  cecho("<red>  #fwalk all              - list all fwalks regardless of location\n")
+  cecho("<red>  #fwalk area             - list all fwalks in current area\n")
+  cecho("<red>  #fwalk list             - show reachable fwalks with direction strings\n")
+  cecho("<red>  #fwalk path name/vnum   - show full path forward and reverse, no movement\n")
+  cecho("<red>  #fwalk step name        - begin stepping through route one room at a time\n")
+  cecho("<red>  #fwalk next             - walk one step forward on active route\n")
+  cecho("<red>  #fwalk cancel           - cancel active step route\n")
+  cecho("<red>  #fwalk export           - export all fwalks to fwalk.csv in profile dir\n")
+  cecho("<red>  #fwalk import           - import fwalks from fwalk.csv (overwrites existing)\n")
+end
+
+-- =============================================================================
+-- ALL — list every fwalk regardless of location
+-- =============================================================================
+function fwalk_all()
+  local tmplist = {}
+  for k, v in pairs(charData:get("fwalk", true)) do
+    if roomExists(v) then
+      local zoneid     = tonumber(getRoomUserData(v, "zoneid"))
+      local pathlength = 0
+      if not roomLocked(v) and getPath(map:getRoom(), v) then
+        pathlength = #speedWalkPath
+      end
+      tmplist[#tmplist+1] = string.format("[%-30s] [%6d %-15s] [%3d] %s\n",
+        NyyLIB.areaTable[zoneid], v, k, pathlength, getRoomName(v))
+    else
+      tmplist[#tmplist+1] = string.format("[%-30s] [%6d %-15s] [%3s] %s\n",
+        "", v, k, "", "")
+    end
+  end
+  cecho("<white>             Area                  Room#      fwalk     Distance          Room Name\n")
+  printSorted(tmplist)
+end
+
+-- =============================================================================
+-- AREA — list fwalks in current area only
+-- =============================================================================
+function fwalk_area()
+  local tmplist       = {}
+  local roomid        = map:getRoom()
+  local currentzoneid = tonumber(getRoomUserData(roomid, "zoneid"))
+
+  for k, v in pairs(charData:get("fwalk", true)) do
+    if roomExists(v) then
+      local zoneid     = tonumber(getRoomUserData(v, "zoneid"))
+      local pathlength = 0
+      if not roomLocked(v) and getPath(map:getRoom(), v) then
+        pathlength = #speedWalkPath
+      end
+      if zoneid == currentzoneid then
+        tmplist[#tmplist+1] = string.format("[%-30s] [%6d %-15s] [%3d] %s\n",
+          NyyLIB.areaTable[zoneid], v, k, pathlength, getRoomName(v))
+      end
+    end
+  end
+  cecho("<white>             Area                  Room#      fwalk     Distance          Room Name\n")
+  printSorted(tmplist)
+end
+
+-- =============================================================================
+-- LIST — reachable fwalks with actual direction string
+-- =============================================================================
+function fwalk_list()
+  local tmplist = {}
+  local store   = charData:get("fwalk", true)
+
+  if map:getRoom() == nil then
+    cecho("<red>[Current room is unknown. Type #find or scan]\n")
+    return
+  end
+
+  for k, v in pairs(store) do
+    if roomExists(v) then
+      local dirs     = ""
+      local distance = 0
+
+      if not roomLocked(v) and getPath(map:getRoom(), v) then
+        distance = #speedWalkPath
+        dirs     = table.concat(speedWalkDir, "")
+      end
+
+      if distance ~= 0 or map:getRoom() == v then
+        tmplist[#tmplist+1] = string.format("[%-20s] [%6d] [%3d] %-30s %s\n",
+          k, v, distance, dirs, getRoomName(v))
+      end
+    end
+  end
+
+  cecho("<white>             fwalk                Room#   Dist  Directions                     Room Name\n")
+  printSorted(tmplist)
+end
+
+-- =============================================================================
+-- PATH — show full path info for a name or room number, no movement
+-- =============================================================================
+function fwalk_path(nameOrVnum)
+  if nameOrVnum == "" then
+    cecho("<red>[#fwalk path requires a name or room number]\n")
+    return
+  end
+
+  if map:getRoom() == nil then
+    cecho("<red>[Current room is unknown]\n")
+    return
+  end
+
+  -- numeric vnum passed directly
+  if tonumber(nameOrVnum) ~= nil then
+    showfastwalk(tonumber(nameOrVnum))
+    return
+  end
+
+  -- named fwalk
+  local store = charData:get("fwalk", true)
+  if store[nameOrVnum] then
+    showfastwalk(store[nameOrVnum])
+  else
+    cecho("<red>[No fwalk named '" .. nameOrVnum .. "']\n")
+  end
+end
+
+-- =============================================================================
+-- STEP — begin stepping through a route one room at a time
+-- =============================================================================
+function fwalk_step_start(name)
+  if name == "" then
+    cecho("<red>[#fwalk step requires a name]\n")
+    return
+  end
+
+  local store = charData:get("fwalk", true)
+  local dest  = store[name]
+
+  if not dest then
+    cecho("<red>[No fwalk named '" .. name .. "']\n")
+    return
+  end
+
+  if map:getRoom() == nil then
+    cecho("<red>[Current room is unknown]\n")
+    return
+  end
+
+  if not getPath(map:getRoom(), dest) then
+    cecho("<red>[No path found to '" .. name .. "']\n")
+    return
+  end
+
+  -- deep copy before doSpeedWalk can mutate the tables
+  local path = {}
+  local dirs = {}
+  for i = 1, #speedWalkPath do
+    path[i] = speedWalkPath[i]
+    dirs[i] = speedWalkDir[i]
+  end
+
+  fwalk_stepstate = { name=name, path=path, dirs=dirs, pos=0 }
+  cecho("<green>[Step mode: '" .. name .. "' — " .. #path .. " steps. Type #fwalk next]\n")
+end
+
+-- =============================================================================
+-- NEXT — walk one step forward on the active route
+-- =============================================================================
+function fwalk_next()
+  local s = fwalk_stepstate
+
+  if s.name == "" or #s.path == 0 then
+    cecho("<red>[No step route active. Use #fwalk step name first]\n")
+    return
+  end
+
+  if inCombat() then
+    cecho("<red>[Can't step while in combat]\n")
+    return
+  end
+
+  s.pos = s.pos + 1
+
+  if s.pos > #s.path then
+    cecho("<green>[Arrived at destination '" .. s.name .. "']\n")
+    fwalk_stepstate = { name="", path={}, dirs={}, pos=0 }
+    return
+  end
+
+  local rid   = s.path[s.pos]
+  local dir   = s.dirs[s.pos]
+  local rname = roomExists(rid) and getRoomName(rid) or "(unknown)"
+
+  cecho("<cyan>[Step " .. s.pos .. "/" .. #s.path .. "] (" .. dir .. ") -> " .. rid .. " " .. rname .. "\n")
+  send(dir)
+end
+
+-- =============================================================================
+-- CANCEL — abort active step route
+-- =============================================================================
+function fwalk_cancel()
+  fwalk_stepstate = { name="", path={}, dirs={}, pos=0 }
+  cecho("<yellow>[Step route cancelled]\n")
+end
+
+-- =============================================================================
+-- ADD
+-- =============================================================================
+function fwalk_add(name, vnum)
+  if name == "" then
+    cecho("<red>[#fwalk add requires a name]\n")
+    return
+  end
+
+  local store      = charData:get("fwalk", true)
+  local targetroom = tonumber(vnum) ~= nil and tonumber(vnum) or map:getRoom()
+
+  if targetroom == nil then
+    cecho("<red>[Current room is unknown and no vnum given]\n")
+    return
+  end
+
+  cecho("<green>[Adding fwalk (" .. name .. ") -> room " .. targetroom .. "]\n")
+  store[name] = targetroom
+  charData:set("fwalk", store, true)
+end
+
+-- =============================================================================
+-- DEL
+-- =============================================================================
+function fwalk_del(name)
+  if name == "" then
+    cecho("<red>[#fwalk del requires a name]\n")
+    return
+  end
+
+  local store = charData:get("fwalk", true)
+  if store[name] then
+    cecho("<green>[Deleting fwalk (" .. name .. ") at room " .. store[name] .. "]\n")
+    store[name] = nil
+    charData:set("fwalk", store, true)
+  else
+    cecho("<red>[No fwalk named '" .. name .. "']\n")
+  end
+end
+
+-- =============================================================================
+-- EXPORT
+-- =============================================================================
+function fwalk_export()
+  local store = charData:get("fwalk", true)
+  local path  = getMudletHomeDir() .. "/fwalk.csv"
+  local fh, err = io.open(path, "w")
+  if not fh then
+    cecho("<red>[fwalk export failed: " .. tostring(err) .. "]\n")
+    return
+  end
+  fh:write("name,roomid\n")
+  local count = 0
+  for k, v in pairs(store) do
+    fh:write(k .. "," .. tostring(v) .. "\n")
+    count = count + 1
+  end
+  fh:close()
+  cecho("<green>[Exported " .. count .. " fwalk(s) to " .. path .. "]\n")
+end
+
+-- =============================================================================
+-- IMPORT
+-- =============================================================================
+function fwalk_import()
+  local path = getMudletHomeDir() .. "/fwalk.csv"
+  local fh, err = io.open(path, "r")
+  if not fh then
+    cecho("<red>[fwalk import failed: " .. tostring(err) .. "]\n")
+    cecho("<red>[Expected file: " .. path .. "]\n")
+    return
+  end
+  local store     = {}
+  local count     = 0
+  local skipped   = 0
+  local firstline = true
+  for line in fh:lines() do
+    if firstline then
+      firstline = false
+    else
+      local name, roomid = line:match("^([^,]+),(%d+)")
+      if name and roomid then
+        store[name] = tonumber(roomid)
+        count = count + 1
+      else
+        skipped = skipped + 1
+      end
+    end
+  end
+  fh:close()
+  charData:set("fwalk", store, true)
+  cecho("<green>[Imported " .. count .. " fwalk(s) from " .. path)
+  if skipped > 0 then
+    cecho(" (" .. skipped .. " malformed line(s) skipped)")
+  end
+  cecho("]\n")
+end
+
+-- =============================================================================
+-- ENTRY POINT — called by alias
+-- =============================================================================
+function fwalk_run(a1, a2, a3)
+  local var1 = string.trim(a1 or "")
+  local var2 = string.trim(a2 or "")
+  local var3 = string.trim(a3 or "")
+
+  -- ── numeric: walk to room number ──────────────────────────────────────────
+  if tonumber(var1) ~= nil then
+    if inCombat() then
+      fwalkQue = false
+      cecho("<red>[Can't #fwalk while in combat]\n")
+      return
+    end
+    fwalk_fastwalk(tonumber(var1))
+    return
+  end
+
+  -- ── commands ──────────────────────────────────────────────────────────────
+  if     var1 == "help"   or var1 == "" then fwalk_help()
+  elseif var1 == "all"                  then fwalk_all()
+  elseif var1 == "area"                 then fwalk_area()
+  elseif var1 == "list"                 then fwalk_list()
+  elseif var1 == "path"                 then fwalk_path(var2)
+  elseif var1 == "step"                 then fwalk_step_start(var2)
+  elseif var1 == "next"                 then fwalk_next()
+  elseif var1 == "cancel"               then fwalk_cancel()
+  elseif var1 == "add"                  then fwalk_add(var2, var3)
+  elseif var1 == "del"                  then fwalk_del(var2)
+  elseif var1 == "export"               then fwalk_export()
+  elseif var1 == "import"               then fwalk_import()
+  else
+    -- ── named bookmark: walk to it ───────────────────────────────────────────
+    local store = charData:get("fwalk", true)
+    if store[var1] then
+      if inCombat() then
+        cecho("<red>[Can't #fwalk while in combat]\n")
+        return
+      end
+      cecho("<green>[Issue speedwalk to " .. var1 .. " at " .. store[var1] .. "]\n")
+      fwalk_fastwalk(store[var1])
+    else
+      cecho("<red>[Unknown command or fwalk '" .. var1 .. "'. Type #fwalk help]\n")
+    end
+  end
+end
